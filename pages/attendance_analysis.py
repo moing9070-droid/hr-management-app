@@ -1,0 +1,202 @@
+import streamlit as st
+import pandas as pd
+from hr_layout import render_page_header
+
+render_page_header(
+    title="📅 연도별 근태 현황 전년 대비 비교 대조 (직원별)", 
+    desc="과거와 최근 연도의 개인별 근태 데이터를 직접 대조하여 직원별 주요 변동 사항 및 특이사항을 도출합니다."
+)
+
+# 1. 엑셀 파싱 함수
+def parse_attendance_data(file):
+    df_raw = pd.read_excel(file, header=None)
+    
+    # '사번' 키워드가 들어간 행 자동 탐색
+    header_idx = None
+    for idx, row in df_raw.iterrows():
+        if row.astype(str).str.contains("사번").any():
+            header_idx = idx
+            break
+            
+    if header_idx is None:
+        raise ValueError("'사번' 컬럼을 찾을 수 없습니다. 엑셀 서식을 확인해 주세요.")
+        
+    headers = [str(c).strip() for c in df_raw.iloc[header_idx].values]
+    df = df_raw.iloc[header_idx + 1:].copy()
+    df.columns = headers
+    
+    # 14번 컬럼(연장근무 인정H) 구체화
+    cols = list(df.columns)
+    if len(cols) > 14 and cols[14] in ["인정H", "nan"]:
+        cols[14] = "연장근무_인정H"
+    df.columns = cols
+    
+    # 기본 데이터 전처리
+    df["사번"] = df["사번"].astype(str).str.strip()
+    df["부서명_clean"] = df["부서명"].astype(str).str.strip()
+    
+    # 수치형 변환
+    df["지각"] = pd.to_numeric(df["지각"], errors='coerce').fillna(0)
+    overtime_col = "연장근무_인정H" if "연장근무_인정H" in df.columns else "지각"
+    df["연장근무_인정H"] = pd.to_numeric(df[overtime_col], errors='coerce').fillna(0)
+    
+    return df
+
+# 2. 업로드 영역
+col_f1, col_f2 = st.columns(2)
+with col_f1:
+    past_file = st.file_uploader("1️⃣ 과거 연도 근태 데이터 (.xlsx)", type=["xlsx"])
+with col_f2:
+    recent_file = st.file_uploader("2️⃣ 최근 연도 근태 데이터 (.xlsx)", type=["xlsx"])
+
+# 3. 데이터 처리 및 직원별 비교 분석
+if past_file and recent_file:
+    try:
+        df_past = parse_attendance_data(past_file)
+        df_recent = parse_attendance_data(recent_file)
+
+        # ----------------------------------------------------
+        # 📌 1. 전사 핵심 지표 요약 (Metric)
+        # ----------------------------------------------------
+        st.markdown("### 📌 전사 근태 핵심 지표 변동 요약")
+        
+        tot_lateness_past = df_past["지각"].sum()
+        tot_lateness_recent = df_recent["지각"].sum()
+        diff_lateness = tot_lateness_recent - tot_lateness_past
+        
+        avg_ot_past = df_past["연장근무_인정H"].mean()
+        avg_ot_recent = df_recent["연장근무_인정H"].mean()
+        diff_ot = avg_ot_recent - avg_ot_past
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("총 지각 발생 건수", f"{int(tot_lateness_recent)}건", f"{diff_lateness:+d}건 (전년 대비)")
+        m2.metric("인당 평균 연장근무", f"{avg_ot_recent:.1f} 시간", f"{diff_ot:+.1f} 시간 (전년 대비)")
+        m3.metric("총 대상 인원", f"{len(df_recent)}명", f"전년 {len(df_past)}명")
+
+        st.markdown("---")
+
+        # ----------------------------------------------------
+        # 👤 2. 직원별 전년 대비 근태 지표 대조표
+        # ----------------------------------------------------
+        st.markdown("### 📋 직원별 전년 대비 근태 지표 대조표")
+        
+        # 사번 기준 과거/최근 데이터 병합
+        df_user_comp = pd.merge(
+            df_recent[["사번", "성명", "부서명_clean", "직위", "지각", "연장근무_인정H"]],
+            df_past[["사번", "지각", "연장근무_인정H"]],
+            on="사번",
+            how="inner",
+            suffixes=("_최근", "_과거")
+        )
+        
+        # 변동폭 계산
+        df_user_comp["지각 변동(건)"] = df_user_comp["지각_최근"] - df_user_comp["지각_과거"]
+        df_user_comp["연장근무 변동(h)"] = df_user_comp["연장근무_인정H_최근"] - df_user_comp["연장근무_인정H_과거"]
+        
+        # 검색 및 필터 옵션
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            search_name = st.text_input("🔍 이름/사번 검색", "")
+        with col_s2:
+            filter_option = st.selectbox("📌 조회 조건", ["전체 보기", "지각 증가자만 보기", "연장근무 증가자만 보기"])
+            
+        # 필터링 적용
+        df_filtered_display = df_user_comp.copy()
+        if search_name:
+            df_filtered_display = df_filtered_display[
+                df_filtered_display["성명"].str.contains(search_name, na=False) |
+                df_filtered_display["사번"].str.contains(search_name, na=False)
+            ]
+            
+        if filter_option == "지각 증가자만 보기":
+            df_filtered_display = df_filtered_display[df_filtered_display["지각 변동(건)"] > 0]
+        elif filter_option == "연장근무 증가자만 보기":
+            df_filtered_display = df_filtered_display[df_filtered_display["연장근무 변동(h)"] > 0]
+            
+        # 출력 표 컬럼 및 명칭 정리
+        df_display = df_filtered_display[[
+            "사번", "성명", "부서명_clean", "직위", 
+            "지각_과거", "지각_최근", "지각 변동(건)",
+            "연장근무_인정H_과거", "연장근무_인정H_최근", "연장근무 변동(h)"
+        ]].copy()
+        
+        df_display.columns = [
+            "사번", "성명", "부서", "직위", 
+            "과거 지각(건)", "최근 지각(건)", "지각 증감(건)",
+            "과거 연장(h)", "최근 연장(h)", "연장 증감(h)"
+        ]
+        
+        # 정수/소수점 포맷 정리
+        df_display["과거 지각(건)"] = df_display["과거 지각(건)"].astype(int)
+        df_display["최근 지각(건)"] = df_display["최근 지각(건)"].astype(int)
+        df_display["지각 증감(건)"] = df_display["지각 증감(건)"].astype(int)
+        df_display["과거 연장(h)"] = df_display["과거 연장(h)"].round(1)
+        df_display["최근 연장(h)"] = df_display["최근 연장(h)"].round(1)
+        df_display["연장 증감(h)"] = df_display["연장 증감(h)"].round(1)
+
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ----------------------------------------------------
+        # 🚨 3. 주요 특이사항 도출 (개인 기준 Top 5)
+        # ----------------------------------------------------
+        st.markdown("### 🔍 주요 개인별 특이사항")
+        
+        col_t1, col_t2 = st.columns(2)
+        
+        # 지각 최다 증가자 Top 5
+        with col_t1:
+            st.markdown("#### 🚩 전년 대비 지각 최다 증가자 Top 5")
+            top_lateness = df_user_comp.sort_values(by="지각 변동(건)", ascending=False).head(5)
+            top_lateness = top_lateness[top_lateness["지각 변동(건)"] > 0]
+            
+            if not top_lateness.empty:
+                for _, row in top_lateness.iterrows():
+                    st.error(f"**{row['성명']}** ({row['부서명_clean']} / {row['직위']}): 지각 **+{int(row['지각 변동(건)'])}건** (최근 {int(row['지각_최근'])}건)")
+            else:
+                st.success("✅ 전년 대비 지각이 증가한 직원이 없습니다.")
+
+        # 연장근무 최다 증가자 Top 5
+        with col_t2:
+            st.markdown("#### ⏱️ 전년 대비 연장근무 최다 증가자 Top 5")
+            top_ot = df_user_comp.sort_values(by="연장근무 변동(h)", ascending=False).head(5)
+            top_ot = top_ot[top_ot["연장근무 변동(h)"] > 0]
+            
+            if not top_ot.empty:
+                for _, row in top_ot.iterrows():
+                    st.warning(f"**{row['성명']}** ({row['부서명_clean']} / {row['직위']}): 연장근무 **+{row['연장근무 변동(h)']:.1f}시간** (최근 {row['연장근무_인정H_최근']:.1f}h)")
+            else:
+                st.info("✅ 전년 대비 연장근무가 증가한 직원이 없습니다.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ----------------------------------------------------
+        # 👤 4. 최근 연도 지각 5회 이상 집중케어 대상자 명단
+        # ----------------------------------------------------
+        st.markdown("### ⚠️ 연간 집중케어 대상자 명단 (최근 지각 5회 이상)")
+        
+        df_care = df_user_comp[df_user_comp["지각_최근"] >= 5].copy()
+        
+        if not df_care.empty:
+            df_care_display = df_care[[
+                "사번", "성명", "부서명_clean", "직위", "지각_과거", "지각_최근", "지각 변동(건)"
+            ]].rename(columns={
+                "부서명_clean": "부서",
+                "지각_과거": "과거 지각(건)",
+                "지각_최근": "최근 지각(건)",
+                "지각 변동(건)": "지각 증감(건)"
+            })
+            df_care_display["과거 지각(건)"] = df_care_display["과거 지각(건)"].astype(int)
+            df_care_display["최근 지각(건)"] = df_care_display["최근 지각(건)"].astype(int)
+            df_care_display["지각 증감(건)"] = df_care_display["지각 증감(건)"].astype(int)
+            
+            st.dataframe(df_care_display, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ 최근 연도 기준 지각 5회 이상인 집중케어 대상자가 없습니다.")
+
+    except Exception as e:
+        st.error(f"파일을 처리하는 과정에서 에러가 발생했습니다: {e}")
+
+else:
+    st.info("💡 과거 연도와 최근 연도 엑셀 파일(.xlsx)을 모두 업로드하시면 직원별 전년 대비 대조표가 활성화됩니다.")
