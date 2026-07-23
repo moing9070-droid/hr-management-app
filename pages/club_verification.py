@@ -4,6 +4,7 @@ import pdfplumber
 from pdf2image import convert_from_path
 import os
 import re
+import tempfile
 import pandas as pd
 from hr_layout import apply_common_layout, render_page_header
 
@@ -24,26 +25,32 @@ if uploaded_file is not None:
 
     if not st.session_state.get("data_loaded", False):
         with st.spinner("📄 PDF 파일 파싱 및 연속성 검증을 진행하고 있습니다..."):
-            with open("temp.pdf", "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            pdf_images = convert_from_path("temp.pdf", dpi=150, poppler_path=r"poppler\bin")
-            st.session_state["pdf_images"] = pdf_images
-            
-            all_rows = []
-            with pdfplumber.open("temp.pdf") as pdf:
-                for page_idx, page in enumerate(pdf.pages):
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            if not row or all(cell is None or str(cell).strip() == "" for cell in row):
-                                continue
-                            clean_row = [str(cell).replace("\n", " ").strip() if cell else "" for cell in row]
-                            if "거래일" in clean_row[0] or "적요" in clean_row[1]:
-                                continue
-                            all_rows.append([page_idx + 1] + clean_row)
-            
-            os.remove("temp.pdf")
+            # 안전한 임시 파일 생성
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(uploaded_file.getbuffer())
+                tmp_pdf_path = tmp_file.name
+
+            try:
+                # ⭕ 핵심 수정: poppler_path 제거 (Streamlit Cloud 및 로컬 OS 자동 인식)
+                pdf_images = convert_from_path(tmp_pdf_path, dpi=150)
+                st.session_state["pdf_images"] = pdf_images
+                
+                all_rows = []
+                with pdfplumber.open(tmp_pdf_path) as pdf:
+                    for page_idx, page in enumerate(pdf.pages):
+                        tables = page.extract_tables()
+                        for table in tables:
+                            for row in table:
+                                if not row or all(cell is None or str(cell).strip() == "" for cell in row):
+                                    continue
+                                clean_row = [str(cell).replace("\n", " ").strip() if cell else "" for cell in row]
+                                if "거래일" in clean_row[0] or "적요" in clean_row[1]:
+                                    continue
+                                all_rows.append([page_idx + 1] + clean_row)
+            finally:
+                # 파일 읽기 종료 후 안전하게 임시 파일 삭제
+                if os.path.exists(tmp_pdf_path):
+                    os.remove(tmp_pdf_path)
 
             if all_rows:
                 max_cols = max(len(r) for r in all_rows)
