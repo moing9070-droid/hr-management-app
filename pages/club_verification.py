@@ -5,6 +5,7 @@ from pdf2image import convert_from_path
 import os
 import re
 import tempfile
+import platform
 import pandas as pd
 from pathlib import Path
 from hr_layout import apply_common_layout, render_page_header
@@ -32,19 +33,22 @@ def get_sample_data():
     ]
     return pd.DataFrame(sample_rows)
 
-# 1. 프로젝트 최상위 디렉토리(Root) 경로 자동 산출
-# pages/club_verification.py 기준으로 상위 폴더(..)가 최상위 루트가 됩니다.
+# 1. 경로 설정
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 2. 프로젝트 루트 내 poppler bin 폴더 상대 경로 지정
-# 예: 프로젝트루트/poppler/Library/bin 또는 프로젝트루트/poppler/bin
-# 실제로 poppler 내부에서 pdfinfo.exe 파일이 들어있는 bin 폴더 경로를 맞춰주세요.
-POPPLER_BIN_DIR = BASE_DIR / "poppler" / "bin"
+# 2. OS 환경 판별 로직 (Windows일 때만 poppler_path 지정)
+poppler_path_arg = None
 
-# 3. 로컬 vs 배포 환경 자동 감지 (poppler_path 조건부 설정)
-# 윈도우용 poppler 폴더가 실제 존재하는 경우에만 poppler_path로 전달합니다.
-poppler_path_arg = str(POPPLER_BIN_DIR) if POPPLER_BIN_DIR.exists() else None
-
+if platform.system() == "Windows":
+    # 로컬 PC의 실제 pdfinfo.exe가 위치한 bin 폴더 경로 체크
+    # (본인 프로젝트 구조에 맞게 Library/bin 또는 bin 지정)
+    path_candidate1 = BASE_DIR / "poppler" / "Library" / "bin"
+    path_candidate2 = BASE_DIR / "poppler" / "bin"
+    
+    if path_candidate1.exists():
+        poppler_path_arg = str(path_candidate1)
+    elif path_candidate2.exists():
+        poppler_path_arg = str(path_candidate2)
 # ----------------------------------------------------
 # [데이터 로딩 로직]
 # ----------------------------------------------------
