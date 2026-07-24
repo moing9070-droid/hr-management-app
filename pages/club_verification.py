@@ -41,6 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 실제로 poppler 내부에서 pdfinfo.exe 파일이 들어있는 bin 폴더 경로를 맞춰주세요.
 POPPLER_BIN_DIR = BASE_DIR / "poppler" / "bin"
 
+# 3. 로컬 vs 배포 환경 자동 감지 (poppler_path 조건부 설정)
+# 윈도우용 poppler 폴더가 실제 존재하는 경우에만 poppler_path로 전달합니다.
+poppler_path_arg = str(POPPLER_BIN_DIR) if POPPLER_BIN_DIR.exists() else None
+
 # ----------------------------------------------------
 # [데이터 로딩 로직]
 # ----------------------------------------------------
@@ -57,7 +61,7 @@ if uploaded_file is not None:
                 tmp_pdf_path = tmp_file.name
 
             try:
-                pdf_images = convert_from_path(tmp_pdf_path, dpi=150, poppler_path=str(POPPLER_BIN_DIR))
+                pdf_images = convert_from_path(tmp_pdf_path, dpi=150, poppler_path=poppler_path_arg)
                 st.session_state["pdf_images"] = pdf_images
                 
                 all_rows = []
