@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import pandas as pd
+from pathlib import Path
 from hr_layout import apply_common_layout, render_page_header
 
 st.set_page_config(page_title="동호회 유효회원 검증", layout="wide")
@@ -15,24 +16,48 @@ render_page_header(
     desc="제출된 은행 거래내역서 원본(.pdf)을 분석하여 회원의 회비 납부 연속성 요건을 원클릭으로 정밀 진단합니다."
 )
 
-uploaded_file = st.file_uploader("검증할 은행 원본 PDF 파일을 업로드해 주세요.", type=["pdf"])
+uploaded_file = st.file_uploader("검증할 은행 원본 PDF 파일을 업로드해 주세요. (미업로드 시 샘플 데이터로 동작합니다)", type=["pdf"])
 st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
 
+# ----------------------------------------------------
+# [샘플 데이터 정의]
+# ----------------------------------------------------
+def get_sample_data():
+    sample_rows = [
+        {"검증상태": "✅ 2개월 연속 완료", "내통장표시/입금자": "김철수(HRD)", "거래일시": "2026-02-05 10:15", "거래금액": 30000, "원본페이지": 1, "적요": "1월 회비"},
+        {"검증상태": "✅ 2개월 연속 완료", "내통장표시/입금자": "김철수(HRD)", "거래일시": "2026-01-05 09:30", "거래금액": 30000, "원본페이지": 1, "적요": "12월 회비"},
+        {"검증상태": "⚠️ 연속성 미충족", "내통장표시/입금자": "이영희(재무)", "거래일시": "2026-02-10 14:20", "거래금액": 30000, "원본페이지": 1, "적요": "2월 회비"},
+        {"검증상태": "✅ 2개월 연속 완료", "내통장표시/입금자": "박민수(IT)", "거래일시": "2026-02-04 18:00", "거래금액": 30000, "원본페이지": 1, "적요": "2월 회비"},
+        {"검증상태": "✅ 2개월 연속 완료", "내통장표시/입금자": "박민수(IT)", "거래일시": "2026-01-04 17:45", "거래금액": 30000, "원본페이지": 1, "적요": "1월 회비"}
+    ]
+    return pd.DataFrame(sample_rows)
+
+# 1. 프로젝트 최상위 디렉토리(Root) 경로 자동 산출
+# pages/club_verification.py 기준으로 상위 폴더(..)가 최상위 루트가 됩니다.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 2. 프로젝트 루트 내 poppler bin 폴더 상대 경로 지정
+# 예: 프로젝트루트/poppler/Library/bin 또는 프로젝트루트/poppler/bin
+# 실제로 poppler 내부에서 pdfinfo.exe 파일이 들어있는 bin 폴더 경로를 맞춰주세요.
+POPPLER_BIN_DIR = BASE_DIR / "poppler" / "bin"
+
+# ----------------------------------------------------
+# [데이터 로딩 로직]
+# ----------------------------------------------------
 if uploaded_file is not None:
+    # 1. 사용자가 직접 파일 업로드한 경우
     if "current_file" not in st.session_state or st.session_state["current_file"] != uploaded_file.name:
         st.session_state["current_file"] = uploaded_file.name
         st.session_state["data_loaded"] = False
 
     if not st.session_state.get("data_loaded", False):
         with st.spinner("📄 PDF 파일 파싱 및 연속성 검증을 진행하고 있습니다..."):
-            # 안전한 임시 파일 생성
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(uploaded_file.getbuffer())
                 tmp_pdf_path = tmp_file.name
 
             try:
-                # ⭕ 핵심 수정: poppler_path 제거 (Streamlit Cloud 및 로컬 OS 자동 인식)
-                pdf_images = convert_from_path(tmp_pdf_path, dpi=150)
+                pdf_images = convert_from_path(tmp_pdf_path, dpi=150, poppler_path=str(POPPLER_BIN_DIR))
                 st.session_state["pdf_images"] = pdf_images
                 
                 all_rows = []
@@ -48,7 +73,6 @@ if uploaded_file is not None:
                                     continue
                                 all_rows.append([page_idx + 1] + clean_row)
             finally:
-                # 파일 읽기 종료 후 안전하게 임시 파일 삭제
                 if os.path.exists(tmp_pdf_path):
                     os.remove(tmp_pdf_path)
 
@@ -94,65 +118,82 @@ if uploaded_file is not None:
                 st.session_state["df_final"] = pd.DataFrame()
             
             st.session_state["data_loaded"] = True
-
-    df_display = st.session_state.get("df_final", pd.DataFrame())
-    pdf_images = st.session_state.get("pdf_images", [])
-    total_pages = len(pdf_images)
-
-    col1, col2 = st.columns([1.0, 1.2], gap="large")
-
-    with col1:
-        st.markdown("<div class='section-title'>🖼️ 원본 거래내역서 대조</div>", unsafe_allow_html=True)
-        if total_pages > 1:
-            page_num = st.number_input(f"페이지 이동 (총 {total_pages}쪽)", min_value=1, max_value=total_pages, value=1)
-        else:
-            page_num = 1
-        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
-        if pdf_images:
-            st.image(pdf_images[page_num - 1], use_container_width=True)
-
-    with col2:
-        tab1, tab2 = st.tabs(["📊 데이터 분석 Grid", "🔍 특정 대상자 집중 추적"])
-        
-        with tab1:
-            st.markdown("<div style='margin-bottom: 16px;'></div>", unsafe_allow_html=True)
-            st.markdown("<p style='font-size:13px; color:#475569; background-color:#F1F5F9; padding:12px; border-radius:8px; border-left:3px solid #64748B;'>💡 <b>검증 기준:</b> 실제 달이 연속하여 회비를 입금한 명단만 자동으로 유효 판정 처리됩니다.</p>", unsafe_allow_html=True)
-            
-            if not df_display.empty:
-                st.dataframe(
-                    df_display, 
-                    use_container_width=True, 
-                    height=520,
-                    column_config={
-                        "검증상태": st.column_config.TextColumn("검증 상태", width="medium"),
-                        "내통장표시/입금자": "입금자명",
-                        "거래금액": st.column_config.NumberColumn("거래 금액", format="%d 원")
-                    }
-                )
-                
-                csv = df_display.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 검증 리포트 추출 (CSV)", data=csv, file_name="bank_verification.csv", mime="text/csv", use_container_width=True)
-            else:
-                st.info("추출된 거래 내역이 존재하지 않습니다.")
-
-        with tab2:
-            st.markdown("<div style='margin-bottom: 16px;'></div>", unsafe_allow_html=True)
-            if not df_display.empty:
-                user_list = sorted(df_display["내통장표시/입금자"].unique())
-                selected_user = st.selectbox("🎯 추적 분석할 대상자를 지정하세요.", ["전체 보기"] + user_list)
-                st.markdown("---")
-                
-                if selected_user != "전체 보기":
-                    user_df = df_display[df_display["내통장표시/입금자"] == selected_user]
-                    user_status = user_df["검증상태"].iloc[0]
-                    if "✅" in user_status:
-                        st.success(f"**{selected_user}** 님은 자격 요건을 충족합니다. ({user_status})")
-                    else:
-                        st.warning(f"**{selected_user}** 님은 연속성 요건을 충족하지 못했습니다.")
-                    st.dataframe(user_df[["검증상태", "거래일시", "거래금액", "원본페이지", "적요"]], use_container_width=True)
+            st.session_state["is_sample"] = False
 else:
-    st.markdown("""
-        <div style="text-align: center; padding: 60px; border: 2px dashed #CBD5E1; border-radius: 12px; background-color: #FFFFFF;">
-            <p style="color: #64748B; font-size: 15px; margin: 0;">상단 업로드 바에 파일(.pdf)을 등록하면 자동 검증 시스템이 가동됩니다.</p>
-        </div>
-    """, unsafe_allow_html=True)
+    # 2. 업로드 파일이 없을 때 (초기 진입 시 샘플 데이터 세팅)
+    st.session_state["df_final"] = get_sample_data()
+    st.session_state["pdf_images"] = []
+    st.session_state["is_sample"] = True
+
+# ----------------------------------------------------
+# [화면 렌더링 로직]
+# ----------------------------------------------------
+df_display = st.session_state.get("df_final", pd.DataFrame())
+pdf_images = st.session_state.get("pdf_images", [])
+total_pages = len(pdf_images)
+
+# 샘플 데이터 동작 중 안내 배너 출력
+if st.session_state.get("is_sample", False):
+    st.info("💡 **샘플 체험 모드:** 파일 업로드 전 시스템 동작 미리보기 화면입니다. 실제 PDF 파일을 업로드하면 등록된 파일 내용으로 자동 전환됩니다.")
+
+col1, col2 = st.columns([1.0, 1.2], gap="large")
+
+with col1:
+    st.markdown("<div class='section-title'>🖼️ 원본 거래내역서 대조</div>", unsafe_allow_html=True)
+    if total_pages > 1:
+        page_num = st.number_input(f"페이지 이동 (총 {total_pages}쪽)", min_value=1, max_value=total_pages, value=1)
+    else:
+        page_num = 1
+    st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+    
+    if pdf_images:
+        st.image(pdf_images[page_num - 1], use_container_width=True)
+    else:
+        # 샘플 모드 또는 이미지 없을 때 가상 뷰어 영역 표시
+        st.markdown("""
+            <div style="text-align: center; padding: 120px 20px; border: 2px dashed #CBD5E1; border-radius: 12px; background-color: #F8FAFC;">
+                <p style="color: #64748B; font-size: 14px; margin: 0; font-weight: 500;">
+                    📄 PDF 파일 업로드 시<br>원본 문서 스캔 이미지가 이 영역에 동시 렌더링됩니다.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+with col2:
+    tab1, tab2 = st.tabs(["📊 데이터 분석 Grid", "🔍 특정 대상자 집중 추적"])
+    
+    with tab1:
+        st.markdown("<div style='margin-bottom: 16px;'></div>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size:13px; color:#475569; background-color:#F1F5F9; padding:12px; border-radius:8px; border-left:3px solid #64748B;'>💡 <b>검증 기준:</b> 실제 달이 연속하여 회비를 입금한 명단만 자동으로 유효 판정 처리됩니다.</p>", unsafe_allow_html=True)
+        
+        if not df_display.empty:
+            st.dataframe(
+                df_display, 
+                use_container_width=True, 
+                height=520,
+                column_config={
+                    "검증상태": st.column_config.TextColumn("검증 상태", width="medium"),
+                    "내통장표시/입금자": "입금자명",
+                    "거래금액": st.column_config.NumberColumn("거래 금액", format="%d 원")
+                }
+            )
+            
+            csv = df_display.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 검증 리포트 추출 (CSV)", data=csv, file_name="bank_verification.csv", mime="text/csv", use_container_width=True)
+        else:
+            st.info("추출된 거래 내역이 존재하지 않습니다.")
+
+    with tab2:
+        st.markdown("<div style='margin-bottom: 16px;'></div>", unsafe_allow_html=True)
+        if not df_display.empty:
+            user_list = sorted(df_display["내통장표시/입금자"].unique())
+            selected_user = st.selectbox("🎯 추적 분석할 대상자를 지정하세요.", ["전체 보기"] + user_list)
+            st.markdown("---")
+            
+            if selected_user != "전체 보기":
+                user_df = df_display[df_display["내통장표시/입금자"] == selected_user]
+                user_status = user_df["검증상태"].iloc[0]
+                if "✅" in user_status:
+                    st.success(f"**{selected_user}** 님은 자격 요건을 충족합니다. ({user_status})")
+                else:
+                    st.warning(f"**{selected_user}** 님은 연속성 요건을 충족하지 못했습니다.")
+                st.dataframe(user_df[["검증상태", "거래일시", "거래금액", "원본페이지", "적요"]], use_container_width=True)
